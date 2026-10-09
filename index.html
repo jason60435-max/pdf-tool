@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>PDF 解密小幫手</title>
+<style>
+:root{--bg:#eef1f4;--card:#fff;--ink:#17212b;--sub:#5b6773;--line:#cfd6dd;--acc:#0f6b5c;--err:#b3261e}
+@media(prefers-color-scheme:dark){:root{--bg:#12171c;--card:#1a2128;--ink:#e8edf1;--sub:#9aa7b2;--line:#2c3640;--acc:#4fc3ad;--err:#ff8a80}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:17px/1.6 "Noto Sans TC","PingFang TC","Microsoft JhengHei",system-ui,sans-serif}
+main{max-width:480px;margin:0 auto;padding:28px 18px 48px}
+h1{font-size:24px;margin:0 0 4px}
+.sub{color:var(--sub);margin:0 0 22px;font-size:15px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px}
+[hidden]{display:none!important}
+.drop{display:block;border:2px dashed var(--line);border-radius:12px;padding:34px 12px;text-align:center;cursor:pointer;color:var(--sub)}
+.drop.on{border-color:var(--acc);color:var(--acc)}
+.drop b{display:block;color:var(--ink);font-size:18px;margin-bottom:4px}
+input[type=file]{display:none}
+.pw{position:relative;margin:14px 0}
+.pw input{width:100%;font:inherit;padding:13px 54px 13px 14px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--ink)}
+.pw button{position:absolute;right:4px;top:4px;bottom:4px;width:48px;background:none;border:0;font-size:20px;cursor:pointer;color:var(--sub)}
+.btn{display:block;width:100%;font:inherit;font-weight:600;padding:14px;border:0;border-radius:10px;background:var(--acc);color:#fff;text-align:center;text-decoration:none;cursor:pointer}
+.btn.ghost{background:none;color:var(--sub);font-weight:400;margin-top:8px}
+.btn:disabled{opacity:.5}
+.name{font-weight:600;word-break:break-all}
+.msg{margin:12px 0 0;font-size:15px;color:var(--err);min-height:1.4em;word-break:break-word}
+.ok{color:var(--acc)}
+:focus-visible{outline:3px solid var(--acc);outline-offset:2px}
+small{display:block;color:var(--sub);margin-top:14px;font-size:13px}
+</style>
+</head>
+<body>
+<main>
+<h1>PDF 解密小幫手</h1>
+<p class="sub">檔案只在這支手機的瀏覽器內處理，不會上傳到任何地方。</p>
+
+<div class="card" id="s1">
+  <label class="drop" id="drop" for="file"><b>選擇 PDF 檔案</b>或把檔案拖到這裡</label>
+  <input type="file" id="file" accept="application/pdf,.pdf">
+  <p class="msg" id="m1" role="alert"></p>
+</div>
+
+<div class="card" id="s2" hidden>
+  <div class="name" id="fn"></div>
+  <div class="pw"><input id="pw" type="password" placeholder="輸入開啟密碼" autocomplete="off">
+    <button type="button" id="eye" aria-label="顯示或隱藏密碼">👁</button></div>
+  <button class="btn" id="go">解密</button>
+  <button class="btn ghost" id="cancel">取消並清除檔案</button>
+  <p class="msg" id="m2" role="alert"></p>
+</div>
+
+<div class="card" id="s3" hidden>
+  <p class="ok name" id="done"></p>
+  <a class="btn" id="dl" href="#">下載 PDF</a>
+  <button class="btn ghost" id="share" hidden>用其他 App 開啟或分享</button>
+  <button class="btn ghost" id="again">處理另一份</button>
+  <small>若原檔有數位簽章，解密後簽章會失效。重新整理或離開本頁後，檔案就會消失。</small>
+</div>
+</main>
+
+<script>
+// 解密程式庫：先試 jsDelivr，失敗再試 unpkg
+(function(){
+  var urls=["https://cdn.jsdelivr.net/npm/@cantoo/pdf-lib/dist/pdf-lib.min.js",
+            "https://unpkg.com/@cantoo/pdf-lib/dist/pdf-lib.min.js"];
+  function load(i){
+    if(i>=urls.length){window.__libFail=true;return}
+    var s=document.createElement("script");s.src=urls[i];
+    s.onerror=function(){load(i+1)};
+    document.head.appendChild(s);
+  }
+  load(0);
+})();
+</script>
+<script>
+const $=id=>document.getElementById(id);
+const SESSION_MS=5*60*1000, MAX_TRIES=3;
+let bytes=null,fname='',tries=0,timer=null,outUrl=null,outFile=null;
+
+function show(n){for(const k of ['s1','s2','s3'])$(k).hidden=k!==n}
+function clearAll(){
+  bytes=null;fname='';tries=0;outFile=null;
+  clearTimeout(timer);timer=null;
+  if(outUrl){URL.revokeObjectURL(outUrl);outUrl=null}
+  $('file').value='';$('pw').value='';$('pw').type='password';
+  $('m1').textContent='';$('m2').textContent='';
+}
+function reset(msg){clearAll();show('s1');$('m1').textContent=msg||''}
+function startTimer(){
+  clearTimeout(timer);
+  timer=setTimeout(()=>reset('已超過 5 分鐘，檔案已清除，請重新上傳。'),SESSION_MS);
+}
+function lib(){
+  if(window.PDFLib&&window.PDFLib.PDFDocument)return window.PDFLib;
+  return null;
+}
+function errText(e){return String((e&&e.message)||e||'')}
+function isPwErr(e){return /password|encrypt|decrypt/i.test(errText(e))}
+function isWrongPw(e){return /incorrect|invalid|wrong|fail/i.test(errText(e))}
+function looksCorrupt(e){return /header|parse|xref|trailer|eof|not a pdf|invalid pdf|no pdf/i.test(errText(e))}
+
+async function pick(f){
+  if(!f)return;
+  if(!/\.pdf$/i.test(f.name)){$('m1').textContent='只支援 PDF 檔案。';return}
+  const L=lib();
+  if(!L){$('m1').textContent=window.__libFail?'無法載入解密程式庫，請確認網路後重新整理。':'解密程式庫還在載入，請稍候再試一次。';return}
+  clearAll();$('m1').textContent='讀取中…';
+  try{
+    bytes=new Uint8Array(await f.arrayBuffer());fname=f.name;
+  }catch(e){bytes=null;$('m1').textContent='讀取檔案失敗，請重試。';return}
+  startTimer();
+  try{
+    const doc=await L.PDFDocument.load(bytes);          // 不給密碼
+    if(doc.isEncrypted){$('m1').textContent='';show('s2');$('fn').textContent=fname;$('pw').focus();return}
+    // 沒有開啟密碼
+    const out=await doc.save();
+    finish(out,'這份 PDF 沒有設定開啟密碼，不需要解密。');
+  }catch(e){
+    if(isPwErr(e)){$('m1').textContent='';$('fn').textContent=fname;show('s2');$('pw').focus();return}
+    const m=looksCorrupt(e)?'這份 PDF 已損壞，無法處理。':'這份 PDF 使用了特殊或不支援的加密方式，無法處理。';
+    reset(m+'\n（技術訊息：'+errText(e).slice(0,120)+'）');
+  }
+}
+
+async function decrypt(){
+  const L=lib();if(!L||!bytes)return;
+  const pw=$('pw').value;
+  $('go').disabled=true;$('m2').textContent='解密中…';
+  try{
+    const doc=await L.PDFDocument.load(bytes,{password:pw});
+    const out=await doc.save();
+    finish(out,'解密完成！');
+  }catch(e){
+    if(isPwErr(e)||isWrongPw(e)){
+      tries++;const left=MAX_TRIES-tries;
+      if(left<=0){reset('密碼錯誤次數已達上限，PDF 已清除，請重新上傳。')}
+      else{$('m2').textContent='密碼錯誤，請重新輸入。還可以嘗試 '+left+' 次。';$('pw').select()}
+    }else{
+      const m=looksCorrupt(e)?'這份 PDF 已損壞，無法處理。':'這份 PDF 使用了特殊或不支援的加密方式，無法處理。';
+      reset(m+' PDF 已清除，請重新上傳。\n（技術訊息：'+errText(e).slice(0,120)+'）');
+    }
+  }
+  $('go').disabled=false;
+}
+
+function finish(out,msg){
+  const name=fname;
+  bytes=null;$('pw').value='';
+  outFile=new File([out],name,{type:'application/pdf'});
+  if(outUrl)URL.revokeObjectURL(outUrl);
+  outUrl=URL.createObjectURL(outFile);
+  $('done').textContent=msg;
+  $('dl').href=outUrl;$('dl').setAttribute('download',name);
+  $('share').hidden=!(navigator.canShare&&navigator.canShare({files:[outFile]}));
+  show('s3');startTimer();
+}
+
+$('file').onchange=e=>pick(e.target.files[0]);
+const dz=$('drop');
+['dragover','dragenter'].forEach(t=>dz.addEventListener(t,e=>{e.preventDefault();dz.classList.add('on')}));
+['dragleave','drop'].forEach(t=>dz.addEventListener(t,e=>{e.preventDefault();dz.classList.remove('on')}));
+dz.addEventListener('drop',e=>pick(e.dataTransfer.files[0]));
+$('eye').onclick=()=>{const p=$('pw');p.type=p.type==='password'?'text':'password'};
+$('go').onclick=decrypt;
+$('pw').addEventListener('keydown',e=>{if(e.key==='Enter')decrypt()});
+$('cancel').onclick=()=>reset();
+$('again').onclick=()=>reset();
+$('share').onclick=async()=>{try{await navigator.share({files:[outFile]})}catch(e){}};
+</script>
+</body>
+</html>
